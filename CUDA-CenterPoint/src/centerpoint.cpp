@@ -25,6 +25,8 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <memory>
+#include <numeric>
 #include <cuda_runtime.h>
 #include "NvInfer.h"
 #include "NvOnnxConfig.h"
@@ -35,6 +37,22 @@
 #include <math.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <cstdint>
+
+// The libspconv ONNX parser API is declared in 3DSparseConvolution's
+// `libspconv/parser/onnx-parser.hpp`. To avoid hard-wiring include paths here,
+// we forward-declare the exported symbol we need.
+namespace spconv {
+std::shared_ptr<Engine> load_engine_from_onnx(
+    const std::string& onnx_file,
+    Precision inference_precision = Precision::Float16,
+    bool sortmask = false,
+    bool enable_blackwell = false,
+    bool with_auxiliary_stream = false,
+    unsigned int fixed_launch_points = 10000,
+    void* stream = nullptr
+);
+}  // namespace spconv
 
 template<typename T>
 double getAverage(std::vector<T> const& v) {
@@ -52,7 +70,10 @@ CenterPoint::CenterPoint(std::string modelFile, bool verbose): verbose_(verbose)
     pre_.reset(new PreProcessCuda());
     post_.reset(new PostProcessCuda());
 
-    scn_engine_ = spconv::load_engine_from_onnx("../model/centerpoint.scn.onnx");
+    // Load 3D backbone engine (libspconv). It expects a SCN ONNX exported by the
+    // corresponding export script.
+    scn_engine_ = spconv::load_engine_from_onnx("../model/centerpoint.scn.onnx", spconv::Precision::Float16);
+    if(scn_engine_ == nullptr) abort();
 
     checkCudaErrors(cudaMallocHost((void **)&h_detections_num_, sizeof(unsigned int)));
     checkCudaErrors(cudaMemset(h_detections_num_, 0, sizeof(unsigned int)));
@@ -142,15 +163,21 @@ int CenterPoint::doinfer(void* points, unsigned int point_num, cudaStream_t stre
     }
 
     timer_.start(stream);
-    auto result = scn_engine_->forward(
-        {valid_num, 5}, spconv::DType::Float16, d_voxel_features,
-        {valid_num, 4}, spconv::DType::Int32,   d_voxel_indices,
-        1, sparse_shape, stream
-    );
+    // Bind inputs then run sparse convolution backbone.
+    // features: [num_voxels, 5] FP16
+    // indices:  [num_voxels, 4] INT32
+    scn_engine_->input(0)->features().reference(
+        (void*)d_voxel_features, std::vector<int64_t>{(int64_t)valid_num, 5}, spconv::DataType::Float16, true);
+    scn_engine_->input(0)->indices().reference(
+        (void*)d_voxel_indices, std::vector<int64_t>{(int64_t)valid_num, 4}, spconv::DataType::Int32, true);
+    scn_engine_->input(0)->set_grid_size(sparse_shape);
+    scn_engine_->forward(stream);
     timing_scn_engine_.push_back(timer_.stop("3D Backbone", verbose_));
 
     timer_.start(stream);
-    trt_->forward({result->features_data(), d_reg_[0], d_height_[0], d_dim_[0], d_rot_[0], d_vel_[0], d_hm_[0],
+    // Feed backbone output into TensorRT RPN+Head.
+    auto scn_out = scn_engine_->output(0)->features().ptr<half>();
+    trt_->forward({scn_out, d_reg_[0], d_height_[0], d_dim_[0], d_rot_[0], d_vel_[0], d_hm_[0],
                                                 d_reg_[1], d_height_[1], d_dim_[1], d_rot_[1], d_vel_[1], d_hm_[1],
                                                 d_reg_[2], d_height_[2], d_dim_[2], d_rot_[2], d_vel_[2], d_hm_[2],
                                                 d_reg_[3], d_height_[3], d_dim_[3], d_rot_[3], d_vel_[3], d_hm_[3],

@@ -25,11 +25,13 @@
 #include <cuda_runtime.h>
 #include "NvInfer.h"
 #include "NvInferRuntime.h"
+#include <NvInferVersion.h>
 #include <iostream>
 #include <algorithm>
 #include <fstream>
 #include <vector>
 #include <numeric>
+#include <sstream>
 
 namespace TensorRT{
 
@@ -44,15 +46,13 @@ static class Logger : public nvinfer1::ILogger {
 
 static std::string format_shape(const nvinfer1::Dims& shape){
 
-    char buf[200] = {0};
-    char* p = buf;
+    std::ostringstream oss;
     for(int i = 0; i < shape.nbDims; ++i){
-        if(i + 1 < shape.nbDims)
-            p += sprintf(p, "%d x ", shape.d[i]);
-        else
-            p += sprintf(p, "%d", shape.d[i]);
+        if(i) oss << " x ";
+        // TensorRT 10 uses int64 dims; earlier versions used int32.
+        oss << static_cast<long long>(shape.d[i]);
     }
-    return buf;
+    return oss.str();
 }
 
 static std::vector<uint8_t> load_file(const std::string& file){
@@ -94,9 +94,16 @@ public:
     nvinfer1::IRuntime* runtime_   = nullptr;
 
     virtual ~EngineImpl(){
+#if NV_TENSORRT_MAJOR >= 10
+        // TensorRT 10 removed destroy(); interfaces have virtual destructors.
+        delete context_;
+        delete engine_;
+        delete runtime_;
+#else
         if(context_) context_->destroy();
         if(engine_)  engine_->destroy();
         if(runtime_) runtime_->destroy();
+#endif
     }
 
     bool load(const std::string& file){
@@ -113,7 +120,11 @@ public:
             return false;
         }
 
+#if NV_TENSORRT_MAJOR >= 10
+        engine_ = runtime_->deserializeCudaEngine(data.data(), data.size());
+#else
         engine_ = runtime_->deserializeCudaEngine(data.data(), data.size(), 0);
+#endif
         if(engine_ == nullptr){
             printf("Failed to deserial CUDAEngine.\n");
             return false;
@@ -128,19 +139,56 @@ public:
     }
 
     virtual int64_t getBindingNumel(const std::string& name) override{
+#if NV_TENSORRT_MAJOR >= 10
+        if(!context_) return 0;
+        nvinfer1::Dims d = context_->getTensorShape(name.c_str());
+        int64_t numel = 1;
+        for(int i = 0; i < d.nbDims; ++i) numel *= static_cast<int64_t>(d.d[i]);
+        return numel;
+#else
         nvinfer1::Dims d = engine_->getBindingDimensions(engine_->getBindingIndex(name.c_str()));
         return std::accumulate(d.d, d.d + d.nbDims, 1, std::multiplies<int64_t>());
+#endif
     }
 
     virtual std::vector<int64_t> getBindingDims(const std::string& name) override{
+#if NV_TENSORRT_MAJOR >= 10
+        if(!context_) return {};
+        nvinfer1::Dims dims = context_->getTensorShape(name.c_str());
+#else
         nvinfer1::Dims dims = engine_->getBindingDimensions(engine_->getBindingIndex(name.c_str()));
-        std::vector<int64_t> output(dims.nbDims);
-        std::transform(dims.d, dims.d + dims.nbDims, output.begin(), [](int32_t v){return v;});
+#endif
+        std::vector<int64_t> output;
+        output.reserve(dims.nbDims);
+        for(int i = 0; i < dims.nbDims; ++i){
+            output.push_back(static_cast<int64_t>(dims.d[i]));
+        }
         return output;
     }
 
     virtual bool forward(const std::initializer_list<void*>& buffers, void* stream = nullptr) override{
+#if NV_TENSORRT_MAJOR >= 10
+        if(!context_ || !engine_) return false;
+
+        const int nIO = engine_->getNbIOTensors();
+        if(static_cast<int>(buffers.size()) != nIO){
+            std::cerr << "TensorRT::forward buffers size mismatch. Expected " << nIO
+                      << ", got " << buffers.size() << std::endl;
+            return false;
+        }
+
+        std::vector<void*> bufs(buffers.begin(), buffers.end());
+        for(int i = 0; i < nIO; ++i){
+            const char* tname = engine_->getIOTensorName(i);
+            if(!context_->setTensorAddress(tname, bufs[i])){
+                std::cerr << "TensorRT::forward failed to setTensorAddress for " << tname << std::endl;
+                return false;
+            }
+        }
+        return context_->enqueueV3((cudaStream_t)stream);
+#else
         return context_->enqueueV2(buffers.begin(), (cudaStream_t)stream, nullptr);
+#endif
     }
 
     virtual void print() override{
@@ -150,6 +198,44 @@ public:
 			return;
 		}
 
+		printf("Engine %p detail\n", this);
+#if NV_TENSORRT_MAJOR >= 10
+        const int nIO = engine_->getNbIOTensors();
+        int numInput = 0;
+        int numOutput = 0;
+        for(int i = 0; i < nIO; ++i){
+            const char* tname = engine_->getIOTensorName(i);
+            auto mode = engine_->getTensorIOMode(tname);
+            if(mode == nvinfer1::TensorIOMode::kINPUT) numInput++;
+            else if(mode == nvinfer1::TensorIOMode::kOUTPUT) numOutput++;
+        }
+
+        printf("Inputs: %d\n", numInput);
+        int inIdx = 0;
+        for(int i = 0; i < nIO; ++i){
+            const char* tname = engine_->getIOTensorName(i);
+            if(engine_->getTensorIOMode(tname) != nvinfer1::TensorIOMode::kINPUT) continue;
+            printf("\t%d.%s : \tshape {%s}, %s\n",
+                inIdx++,
+                tname,
+                format_shape(context_->getTensorShape(tname)).c_str(),
+                data_type_string(engine_->getTensorDataType(tname))
+            );
+        }
+
+        printf("Outputs: %d\n", numOutput);
+        int outIdx = 0;
+        for(int i = 0; i < nIO; ++i){
+            const char* tname = engine_->getIOTensorName(i);
+            if(engine_->getTensorIOMode(tname) != nvinfer1::TensorIOMode::kOUTPUT) continue;
+            printf("\t%d.%s : \tshape {%s}, %s\n",
+                outIdx++,
+                tname,
+                format_shape(context_->getTensorShape(tname)).c_str(),
+                data_type_string(engine_->getTensorDataType(tname))
+            );
+        }
+#else
         int numInput = 0;
         int numOutput = 0;
         for(int i = 0; i < engine_->getNbBindings(); ++i){
@@ -159,28 +245,28 @@ public:
                 numOutput++;
         }
 
-		printf("Engine %p detail\n", this);
-		printf("Inputs: %d\n", numInput);
-		for(int i = 0; i < numInput; ++i){
+        printf("Inputs: %d\n", numInput);
+        for(int i = 0; i < numInput; ++i){
             int ibinding = i;
-			printf("\t%d.%s : \tshape {%s}, %s\n",
+            printf("\t%d.%s : \tshape {%s}, %s\n",
                 i,
                 engine_->getBindingName(ibinding),
                 format_shape(engine_->getBindingDimensions(ibinding)).c_str(),
                 data_type_string(engine_->getBindingDataType(ibinding))
             );
-		}
+        }
 
-		printf("Outputs: %d\n", numOutput);
-		for(int i = 0; i < numOutput; ++i){
-			int ibinding = i + numInput;
-			printf("\t%d.%s : \tshape {%s}, %s\n",
+        printf("Outputs: %d\n", numOutput);
+        for(int i = 0; i < numOutput; ++i){
+            int ibinding = i + numInput;
+            printf("\t%d.%s : \tshape {%s}, %s\n",
                 i,
                 engine_->getBindingName(ibinding),
                 format_shape(engine_->getBindingDimensions(ibinding)).c_str(),
                 data_type_string(engine_->getBindingDataType(ibinding))
             );
-		}
+        }
+#endif
     }
 };
 
