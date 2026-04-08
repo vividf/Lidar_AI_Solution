@@ -130,8 +130,6 @@ int CenterPoint::prepare(){
 
 int CenterPoint::doinfer(void* points, unsigned int point_num, cudaStream_t stream)
 {
-    float elapsedTime = 0.0f;
-
     timer_.start(stream);
     pre_->generateVoxels((float *)points, point_num, stream);
     timing_pre_.push_back(timer_.stop("Voxelization", verbose_));
@@ -142,15 +140,16 @@ int CenterPoint::doinfer(void* points, unsigned int point_num, cudaStream_t stre
     }
 
     timer_.start(stream);
-    auto result = scn_engine_->forward(
-        {valid_num, 5}, spconv::DType::Float16, d_voxel_features,
-        {valid_num, 4}, spconv::DType::Int32,   d_voxel_indices,
-        1, sparse_shape, stream
-    );
+    auto* scn_input = scn_engine_->input(0);
+    scn_input->features().reference(d_voxel_features, {valid_num, 5}, spconv::DataType::Float16, true);
+    scn_input->indices().reference(d_voxel_indices, {valid_num, 4}, spconv::DataType::Int32, true);
+    scn_input->set_grid_size(sparse_shape);
+    scn_engine_->forward(stream);
+    auto* result = scn_engine_->output(0);
     timing_scn_engine_.push_back(timer_.stop("3D Backbone", verbose_));
 
     timer_.start(stream);
-    trt_->forward({result->features_data(), d_reg_[0], d_height_[0], d_dim_[0], d_rot_[0], d_vel_[0], d_hm_[0],
+    trt_->forward({result->features().ptr(), d_reg_[0], d_height_[0], d_dim_[0], d_rot_[0], d_vel_[0], d_hm_[0],
                                                 d_reg_[1], d_height_[1], d_dim_[1], d_rot_[1], d_vel_[1], d_hm_[1],
                                                 d_reg_[2], d_height_[2], d_dim_[2], d_rot_[2], d_vel_[2], d_hm_[2],
                                                 d_reg_[3], d_height_[3], d_dim_[3], d_rot_[3], d_vel_[3], d_hm_[3],

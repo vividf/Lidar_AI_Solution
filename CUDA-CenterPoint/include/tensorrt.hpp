@@ -34,7 +34,7 @@ namespace TensorRT{
     public:
         virtual int64_t getBindingNumel(const std::string& name) = 0;
         virtual std::vector<int64_t> getBindingDims(const std::string& name) = 0;
-        virtual bool forward(const std::initializer_list<void*>& buffers, void* stream = nullptr) = 0;
+        virtual bool forward(std::initializer_list<void*> buffers, void* stream = nullptr) = 0;
         virtual void print() = 0;
     };
 

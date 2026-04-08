@@ -27,6 +27,7 @@
 #include "NvInfer.h"
 #include "NvOnnxConfig.h"
 #include "NvInferRuntime.h"
+#include "onnx-parser.hpp"
 #include "preprocess.h"
 #include "postprocess.h"
 #include "spconv/engine.hpp"
