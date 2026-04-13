@@ -55,7 +55,7 @@ CenterPoint::CenterPoint(std::string modelFile, bool verbose): verbose_(verbose)
     //scn_engine_ = spconv::load_engine_from_onnx("../model/centerpoint.scn.onnx");
 
     std::string scn_path = "../model/centerpoint.scn.onnx.ptq";
-    scn_engine_ = spconv::load_engine_from_onnx(scn_path);
+    scn_engine_ = spconv::load_engine_from_onnx(scn_path, spconv::Precision::Int8);
     std::cout << "scn_engine loaded successfully" << scn_path << std::endl;
 
 
