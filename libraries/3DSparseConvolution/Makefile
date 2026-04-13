@@ -69,7 +69,7 @@ pro   : workspace/pro
 pyscn : tool/pyscn.so
 infer : workspace/infer
 	@cd workspace && ./infer --onnx=bevfusion/bevfusion.scn.xyz.onnx --feature=bevfusion/infer.xyz.voxels --indice=bevfusion/infer.xyz.coors --grid_size=1440,1440,41 --cudagraph --sortmask --auxiliary_stream
-	@python tool/compare.py workspace/bevfusion/infer.xyz.dense workspace/output0_40.tensor --detail
+	@python3 tool/compare.py workspace/bevfusion/infer.xyz.dense workspace/output0_40.tensor --detail
 
 best_perf : workspace/infer
 	@cd workspace && ./infer --onnx=bevfusion/bevfusion.scn.xyz.onnx --feature=bevfusion/infer.xyz.voxels --indice=bevfusion/infer.xyz.coors --grid_size=1440,1440,41 --search_best_perf
