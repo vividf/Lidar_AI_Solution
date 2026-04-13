@@ -22,9 +22,14 @@
 
 # export CUDA_VISIBLE_DEVICES=2
 
-export TensorRT_Lib=/path/to/tensorrt/lib
-export TensorRT_Inc=/path/to/tensorrt/include
-export TensorRT_Bin=/path/to/tensorrt/bin
+#export TensorRT_Lib=/path/to/tensorrt/lib
+#export TensorRT_Inc=/path/to/tensorrt/include
+#export TensorRT_Bin=/path/to/tensorrt/bin
+
+export TensorRT_Lib=/usr/lib/x86_64-linux-gnu
+export TensorRT_Inc=/usr/include/x86_64-linux-gnu
+export TensorRT_Bin=/usr/src/tensorrt/bin   # 或 /usr/bin
+
 
 export CUDA_HOME=/usr/local/cuda
 export CUDA_Lib=$CUDA_HOME/lib64
